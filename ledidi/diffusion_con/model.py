@@ -67,24 +67,32 @@ class DiffusionTransformerBlock(nn.Module):
         return x
 
 class DiffusionModel(nn.Module):
-    def __init__(self, seq_len, num_classes, hidden_size, num_layers=6, num_heads=8):
+    def __init__(self, seq_len, num_classes, hidden_size, num_layers=6, num_heads=8, self_conditioning=True):
         super(DiffusionModel, self).__init__()
         self.seq_len = seq_len
         self.num_classes = num_classes
         self.hidden_size = hidden_size
+        self.self_conditioning = self_conditioning
 
-        self.input_embedding = nn.Linear(num_classes, hidden_size)
+        # Adjust input size based on self-conditioning
+        input_size = num_classes * 2 if self_conditioning else num_classes
 
+        self.input_embedding = nn.Linear(input_size, hidden_size)
+
+        # Timestep and score embeddings
         self.timestep_embedder = TimestepEmbedder(hidden_size)
         self.score_embedder = ScoreEmbedder(hidden_size)
 
+        # Positional embedding
         self.pos_embedding = nn.Parameter(torch.zeros(1, seq_len, hidden_size), requires_grad=False)
         self.initialize_positional_embedding()
 
+        # Transformer blocks
         self.blocks = nn.ModuleList([
             DiffusionTransformerBlock(hidden_size, num_heads) for _ in range(num_layers)
         ])
 
+        # Output layer
         self.output_layer = nn.Linear(hidden_size, num_classes)
 
     def initialize_positional_embedding(self):
@@ -95,15 +103,30 @@ class DiffusionModel(nn.Module):
         pe[0, :, 1::2] = torch.cos(position * div_term)
         self.pos_embedding.data.copy_(pe)
 
-    def forward(self, x_t, t, score):
-        x = self.input_embedding(x_t) + self.pos_embedding
-
+    def forward(self, x_t, t, score, x_self_cond=None):
+        """
+        x_t: [batch_size, seq_len, num_classes]
+        t: [batch_size]
+        score: [batch_size]
+        x_self_cond: [batch_size, seq_len, num_classes] (Optional)
+        """
+        if self.self_conditioning:
+            if x_self_cond is None:
+                # Set x_self_cond to zeros with the same shape as x_t
+                x_self_cond = torch.zeros_like(x_t)
+            x_input = torch.cat([x_t, x_self_cond], dim=-1)
+        else:
+            x_input = x_t
+        x = self.input_embedding(x_input) + self.pos_embedding
+        # Timestep and score embeddings
         t_emb = self.timestep_embedder(t)
         score = score.unsqueeze(1)
         score_emb = self.score_embedder(score)
 
+        # Transformer blocks
         for block in self.blocks:
             x = block(x, t_emb, score_emb)
 
+        # Output layer
         logits = self.output_layer(x)
         return logits
